@@ -156,7 +156,7 @@ namespace RainMeadow
             public float sendFrequency = 1f;
             public float sendCounter = 0;
 
-            public const float OPTIMIZATION_AMOUNT_TEMPORARY = 0.5f;
+            public const float OPTIMIZATION_AMOUNT_TEMPORARY = 1.2f;
 
             public OnlineFieldAttribute(float sendFrequency, string group, bool nullable = false, bool polymorphic = false, bool always = false)
             {
