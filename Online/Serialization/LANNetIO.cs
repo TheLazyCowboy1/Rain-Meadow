@@ -1,3 +1,4 @@
+using Ionic.Zlib;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -120,7 +121,7 @@ namespace RainMeadow
                 try
                 {
                     //RainMeadow.Debug("To read: " + UdpPeer.debugClient.Available);
-                    byte[]? data = manager.Recieve(out EndPoint remoteEndpoint);
+                    byte[]? data = Decompress(manager.Recieve(out EndPoint remoteEndpoint));
                     if (data == null) continue;
                     IPEndPoint? iPEndPoint = remoteEndpoint as IPEndPoint;
                     if (iPEndPoint is null) continue;
@@ -147,5 +148,19 @@ namespace RainMeadow
             }
         }
 
+        private byte[]? Decompress(byte[]? bytes)
+        {
+            if (bytes == null) return null;
+            int formerLength = bytes.Length;
+            using (var outStream = new MemoryStream())
+            using (var compressStream = new MemoryStream(bytes))
+            using (var decompressor = new DeflateStream(compressStream, CompressionMode.Decompress))
+            {
+                decompressor.CopyTo(outStream);
+                var output = outStream.ToArray();
+                RainMeadow.Debug($"Decompressed {formerLength} bytes to {output.Length} bytes.");
+                return output;
+            }
+        }
     }
 }

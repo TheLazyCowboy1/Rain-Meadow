@@ -1,3 +1,4 @@
+using Ionic.Zlib;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -726,7 +727,10 @@ namespace RainMeadow
         }
 
         public void SendRaw(byte[] packet, RemotePeer peer, PacketType packet_type, bool begin_conversation = false) {
-            using (MemoryStream stream = new(packet.Length + 1)) 
+            //compress packet
+            packet = Compress(packet); //compresses only the packet itself, not its type or length, etc.
+
+            using (MemoryStream stream = new(packet.Length + 6)) 
             using (BinaryWriter writer = new(stream)) {
                 writer.Write((byte)packet_type);
                 if (packet_type == PacketType.Reliable)  {
@@ -734,11 +738,41 @@ namespace RainMeadow
                     writer.Write(peer.wanted_acknowledgement);
                 }
                     
-
                 if (packet_type == PacketType.Acknowledgement)
                     writer.Write(peer.remote_acknowledgement);
+
                 writer.Write(packet);
-                socket.SendTo(stream.GetBuffer().Take((int)stream.Position).ToArray(), peer.PeerEndPoint);
+                //int len = (int)stream.Position;
+                //byte[] compressed = Compress(stream, len); //compresses ABSOLUTELY EVERYTHING that gets sent
+                //RainMeadow.Debug($"Compressed packet size: {compressed.Length} / {len}");
+                socket.SendTo(stream.GetBuffer().Take((int)stream.Position).ToArray(),
+                    //compressed,
+                    peer.PeerEndPoint);
+            }
+        }
+        private static byte[] Compress(byte[] bytes)
+        {
+            int formerSize = bytes.Length;
+            using (var outputStream = new MemoryStream(bytes))
+            using (var compressStream = new MemoryStream())
+            using (var compressor = new DeflateStream(compressStream, CompressionMode.Compress))
+            {
+                outputStream.CopyTo(compressor);
+                compressor.Close();
+                var output = compressStream.ToArray();
+                RainMeadow.Debug($"Compressed {formerSize} bytes to {output.Length} bytes.");
+                return output;
+            }
+        }
+        private static byte[] Compress(Stream input, int len)
+        {
+            input.Seek(0, SeekOrigin.Begin);
+            using (var compressStream = new MemoryStream())
+            using (var compressor = new DeflateStream(compressStream, CompressionMode.Compress))
+            {
+                input.CopyTo(compressor, len);
+                compressor.Close();
+                return compressStream.ToArray();
             }
         }
 
@@ -830,36 +864,45 @@ namespace RainMeadow
                     RainMeadow.Error(except);
                     return null;
                 }
-                
+
 
                 IPEndPoint? ipsender = sender as IPEndPoint;
                 if (ipsender == null) return null; 
 
                 RemotePeer? peer = GetRemotePeer(ipsender);
-                
-                using (MemoryStream stream = new(buffer, 0, len, false)) 
-                using (BinaryReader reader = new(stream)) {
-                    try {
+
+                //decompress buffer
+                //buffer = Decompress(buffer);
+
+                using (MemoryStream stream = new(buffer, 0, buffer.Length, false))
+                using (BinaryReader reader = new(stream))
+                {
+                    try
+                    {
                         PacketType type = (PacketType)reader.ReadByte();
-                        
-                        if (type == PacketType.Reliable) {
+
+                        if (type == PacketType.Reliable)
+                        {
                             bool begin_conversation = reader.ReadBoolean();
-                            if (begin_conversation && peer == null) {
+                            if (begin_conversation && peer == null)
+                            {
                                 peer = GetRemotePeer(ipsender, true);
                             }
                         }
 
                         if (type != PacketType.UnreliableBroadcast) // If it's a broadcast, we don't need to start a converstation.
-                        if (peer == null) {
-                            RainMeadow.Debug("Recieved packet from peer we haven't started a conversation with.");
-                            RainMeadow.Debug(ipsender.ToString());
-                            RainMeadow.Debug(Enum.GetName(typeof(PacketType), type));
-                            return null;
-                        }
+                            if (peer == null)
+                            {
+                                RainMeadow.Debug("Recieved packet from peer we haven't started a conversation with.");
+                                RainMeadow.Debug(ipsender.ToString());
+                                RainMeadow.Debug(Enum.GetName(typeof(PacketType), type));
+                                return null;
+                            }
 
                         if (peer != null) peer.TicksSinceLastIncomingPacket = 0;
 
-                        switch (type) {
+                        switch (type)
+                        {
                             case PacketType.UnreliableBroadcast:
                             case PacketType.Unreliable:
                                 return reader.ReadBytes(len - 1);
@@ -869,8 +912,9 @@ namespace RainMeadow
 
                                 ulong wanted_ack = reader.ReadUInt64();
                                 byte[]? new_data = null;
-                                
-                                if (EventMath.IsNewer(wanted_ack, peer.remote_acknowledgement)) {
+
+                                if (EventMath.IsNewer(wanted_ack, peer.remote_acknowledgement))
+                                {
                                     peer.remote_acknowledgement = wanted_ack;
                                     new_data = reader.ReadBytes(len - 1);
                                 }
@@ -879,9 +923,11 @@ namespace RainMeadow
                             case PacketType.Acknowledgement:
                                 if (peer == null) return null;
                                 ulong remote_ack = reader.ReadUInt64();
-                                if (EventMath.IsNewerOrEqual(remote_ack, peer.wanted_acknowledgement)) {
+                                if (EventMath.IsNewerOrEqual(remote_ack, peer.wanted_acknowledgement))
+                                {
                                     ++peer.wanted_acknowledgement;
-                                    if (peer.outgoingpacket.Count > 0) {
+                                    if (peer.outgoingpacket.Count > 0)
+                                    {
                                         peer.outgoingpacket.Dequeue();
                                     }
                                 }
@@ -895,7 +941,9 @@ namespace RainMeadow
                             default:
                                 return null; // Ignore it.
                         }
-                    } catch (Exception except) {
+                    }
+                    catch (Exception except)
+                    {
                         RainMeadow.Debug(except);
                         RainMeadow.Debug($"Error: {except.Message}");
                         return null;
@@ -906,8 +954,20 @@ namespace RainMeadow
         }
 
 
+        private byte[] Decompress(byte[] bytes)
+        {
+            int formerLength = bytes.Length;
+            using (var outStream = new MemoryStream())
+            using (var compressStream = new MemoryStream(bytes))
+            using (var decompressor = new DeflateStream(compressStream, CompressionMode.Decompress))
+            {
+                decompressor.CopyTo(outStream);
+                var output = outStream.ToArray();
+                RainMeadow.Debug($"Decompressed {formerLength} bytes to {output.Length} bytes.");
+                return output;
+            }
+        }
 
-        
 
         void IDisposable.Dispose() {
             socket.Dispose();

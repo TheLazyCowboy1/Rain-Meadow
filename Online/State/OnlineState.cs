@@ -12,6 +12,7 @@ namespace RainMeadow
     {
         public StateHandler handler;
         public bool[] valueFlags;
+        public bool[] unsentDeltas;
 
         public bool isDelta;
         public bool IsEmptyDelta => isDelta && !this.valueFlags.Any(x => x);
@@ -20,6 +21,7 @@ namespace RainMeadow
         {
             handler = handlersByType[GetType()];
             valueFlags = new bool[handler.ngroups];
+            unsentDeltas = new bool[handler.ngroups];
         }
 
         // Warning: not a deep clone
@@ -27,6 +29,7 @@ namespace RainMeadow
         {
             var e = (OnlineState)MemberwiseClone();
             e.valueFlags = new bool[handler.ngroups];
+            e.unsentDeltas = new bool[handler.ngroups];
             return e;
         }
 
@@ -156,7 +159,7 @@ namespace RainMeadow
             public float sendFrequency = 1f;
             public float sendCounter = 0;
 
-            public const float OPTIMIZATION_AMOUNT_TEMPORARY = 1.2f;
+            public const float OPTIMIZATION_AMOUNT_TEMPORARY = 0.5f;
 
             public OnlineFieldAttribute(float sendFrequency, string group, bool nullable = false, bool polymorphic = false, bool always = false)
             {
@@ -173,7 +176,7 @@ namespace RainMeadow
             public OnlineFieldAttribute(float sendFrequency = 1f, bool nullable = false, bool polymorphic = false, bool always = false)
             {
                 this.sendFrequency = sendFrequency;
-                this.group = UnityEngine.Random.value.GetHashCode().ToString(); //assign it as a random group
+                this.group = "";
                 this.nullable = nullable;
                 this.polymorphic = polymorphic;
                 this.always = always;
@@ -184,42 +187,29 @@ namespace RainMeadow
             {
                 return Expression.Call(serializerRef, Serializer.GetSerializationMethod(f.FieldType, nullable, polymorphic, longList), fieldRef);
             }
-            public virtual bool ShouldSend() => sendCounter <= 0 || always;
-            public virtual bool ShouldSendAndDecrement()
+            public virtual bool ShouldSend()
             {
-                if (always) return true;
+                if (always) return false;
                 bool shouldSend = sendCounter <= 0;
                 if (shouldSend)
                     sendCounter += sendFrequency;
                 sendCounter -= Mathf.Min(sendFrequency, OPTIMIZATION_AMOUNT_TEMPORARY);
-                return shouldSend;
+                return !shouldSend;
             }
 
-            public virtual Expression ComparisonMethod(FieldInfo f, MemberExpression currentField, MemberExpression baselineField, MemberExpression outputField)
+            public virtual Expression ShouldSendMethod()
             {
-                var testExpression1 = Expression.Call(Expression.Constant(this), typeof(OnlineFieldAttribute).GetMethod(nameof(ShouldSend)));
-                var testExpression2 = Expression.Call(Expression.Constant(this), typeof(OnlineFieldAttribute).GetMethod(nameof(ShouldSendAndDecrement)));
-                //assigns outputField with baselineField and returns true
-                var assignExpression = Expression.Assign(outputField, baselineField);
+                return Expression.Call(Expression.Constant(this), typeof(OnlineFieldAttribute).GetMethod(nameof(ShouldSend)));
+            }
 
-                if (f.FieldType.IsArray) return Expression.Block(
-                    Expression.IfThen(testExpression1, assignExpression),
-                    Expression.Condition(testExpression2,
-                        Expression.Call(
-                            typeof(Enumerable).GetMethods().First(m => m.Name == "SequenceEqual" && m.IsGenericMethodDefinition && m.GetParameters().Length == 2).MakeGenericMethod(f.FieldType.GetElementType()),
-                            Expression.Convert(currentField, typeof(IEnumerable<>).MakeGenericType(f.FieldType.GetElementType())),
-                            Expression.Convert(baselineField, typeof(IEnumerable<>).MakeGenericType(f.FieldType.GetElementType()))
-                            ),
-                        Expression.Constant(true)
-                    )
-                );
-                return Expression.Block(
-                    Expression.IfThen(testExpression1, assignExpression),
-                    Expression.Condition(testExpression2,
-                        Expression.Equal(currentField, baselineField),
-                        Expression.Constant(true)
-                    )
-                );
+            public virtual Expression ComparisonMethod(FieldInfo f, MemberExpression currentField, MemberExpression baselineField)
+            {
+                if (f.FieldType.IsArray) return Expression.Call(
+                    typeof(Enumerable).GetMethods().First(m => m.Name == "SequenceEqual" && m.IsGenericMethodDefinition && m.GetParameters().Length == 2).MakeGenericMethod(f.FieldType.GetElementType()),
+                    Expression.Convert(currentField, typeof(IEnumerable<>).MakeGenericType(f.FieldType.GetElementType())),
+                    Expression.Convert(baselineField, typeof(IEnumerable<>).MakeGenericType(f.FieldType.GetElementType()))
+                    );
+                return Expression.Equal(currentField, baselineField);
             }
         }
 
@@ -299,12 +289,18 @@ namespace RainMeadow
                     RainMeadow.Debug($"found {fields.Length} fields");
                     if (fields.Length > 0) RainMeadow.Debug(fields.Select(f => $"{f.FieldType.Name} {f.Name}").Aggregate((a, b) => a + "\n" + b));
                     else throw new InvalidProgrammerException($"Type {type} has no online fields");
+
+                    //assign group to field name if group == ""
+                    foreach (var f in fields)
+                        if (f.GetCustomAttribute<OnlineFieldAttribute>().group == "") f.GetCustomAttribute<OnlineFieldAttribute>().group = f.Name;
+
                     var keys = fields.Where(o => o.GetCustomAttribute<OnlineFieldAttribute>().always).ToList();
                     Dictionary<string, List<FieldInfo>> deltaGroups = fields.Where(o => !o.GetCustomAttribute<OnlineFieldAttribute>().always).GroupBy(o => o.GetCustomAttribute<OnlineFieldAttribute>().group).ToDictionary(g => g.Key, g => g.ToList());
                     ngroups = deltaGroups.Count;
                     RainMeadow.Debug($"found {ngroups} groups");
 
                     var valueFlagsAcessor = typeof(OnlineState).GetField("valueFlags", anyInstance);
+                    var unsentDeltasAcessor = typeof(OnlineState).GetField("unsentDeltas", anyInstance);
                     var isDeltaAcessor = typeof(OnlineState).GetField("isDelta", anyInstance);
                     var baselineAcessor = typeof(RootDeltaState).GetField("baseline", anyInstance);
                     var tickAcessor = typeof(RootDeltaState).GetField("tick", anyInstance);
@@ -474,26 +470,49 @@ namespace RainMeadow
                         // set flags for sent/omitted fields
                         for (int i = 0; i < ngroups; i++)
                         {
-                            if (deltaGroups[deltaGroups.Keys.ToList()[i]].Count == 0) continue;
+                            string deltaGroupKey = deltaGroups.Keys.ToList()[i];
+                            if (deltaGroups[deltaGroupKey].Count == 0) continue;
                             // valueFlags[i] = self.f != baseline.f || self.f2 != baseline.f2 || ...
-                            expressions.Add(Expression.Assign(Expression.ArrayAccess(Expression.Field(output, valueFlagsAcessor), Expression.Constant(i)),
-                                OrAny(deltaGroups[deltaGroups.Keys.ToList()[i]].Select(
-                                        f => Expression.Not(
-                                            (f.FieldType.GetInterfaces().Any(x => x.IsGenericType && x.GetGenericTypeDefinition() == typeof(IPrimaryDelta<>))) ?
-                                                // (this.f && b.f) ? delta.f.isempty : (this.f == b.f)
-                                                Expression.Condition(Expression.AndAlso(
-                                                    Expression.NotEqual(Expression.Field(selfConverted, f), Expression.Constant(null, f.FieldType)),
-                                                    Expression.NotEqual(Expression.Field(baselineConverted, f), Expression.Constant(null, f.FieldType))
-                                                    ),
-                                                    Expression.Call(Expression.Field(output, f), f.FieldType.GetProperty("IsEmptyDelta").GetMethod),
-                                                    Expression.Equal(Expression.Field(selfConverted, f), Expression.Field(baselineConverted, f))
+                            expressions.Add(Expression.OrAssign( //if there's a delta waiting to be sent, keep unsent = true
+                                Expression.ArrayAccess(Expression.Field(self, unsentDeltasAcessor), Expression.Constant(i)),
+                                OrAny(deltaGroups[deltaGroupKey].Select(
+                                            f => Expression.Not(
+                                                (f.FieldType.GetInterfaces().Any(x => x.IsGenericType && x.GetGenericTypeDefinition() == typeof(IPrimaryDelta<>))) ?
+                                                    // (this.f && b.f) ? delta.f.isempty : (this.f == b.f)
+                                                    Expression.Condition(Expression.AndAlso(
+                                                        Expression.NotEqual(Expression.Field(selfConverted, f), Expression.Constant(null, f.FieldType)),
+                                                        Expression.NotEqual(Expression.Field(baselineConverted, f), Expression.Constant(null, f.FieldType))
+                                                        ),
+                                                        Expression.Call(Expression.Field(output, f), f.FieldType.GetProperty("IsEmptyDelta").GetMethod),
+                                                        Expression.Equal(Expression.Field(selfConverted, f), Expression.Field(baselineConverted, f))
+                                                    )
+                                                : (f.FieldType.GetInterfaces().Any(x => x.IsGenericType && x.GetGenericTypeDefinition() == typeof(IDelta<>))) ?
+                                                    Expression.Equal(Expression.Field(output, f), Expression.Constant(null, f.FieldType))
+                                                : f.GetCustomAttribute<OnlineFieldAttribute>().ComparisonMethod(f, Expression.Field(selfConverted, f), Expression.Field(baselineConverted, f))
                                                 )
-                                            : (f.FieldType.GetInterfaces().Any(x => x.IsGenericType && x.GetGenericTypeDefinition() == typeof(IDelta<>))) ?
-                                                Expression.Equal(Expression.Field(output, f), Expression.Constant(null, f.FieldType))
-                                            : f.GetCustomAttribute<OnlineFieldAttribute>().ComparisonMethod(f, Expression.Field(selfConverted, f), Expression.Field(baselineConverted, f), Expression.Field(output, f))
-                                            )
-                                    ).Where(e => e != null).ToArray())
+                                        ).Where(e => e != null).ToArray())
                                 ));
+
+                            //assign unsentDeltas in self as well
+                            expressions.Add(
+                                Expression.IfThenElse(
+                                    deltaGroups[deltaGroupKey][0].GetCustomAttribute<OnlineFieldAttribute>().ShouldSendMethod(),
+                                    Expression.Block(
+                                        Expression.Assign( //set output's value flag, depending on whether there's a delta
+                                            Expression.ArrayAccess(Expression.Field(output, valueFlagsAcessor), Expression.Constant(i)),
+                                            Expression.ArrayAccess(Expression.Field(self, unsentDeltasAcessor), Expression.Constant(i))
+                                            ),
+                                        Expression.Assign( //delta is sent; mark unsentDelta as false
+                                            Expression.ArrayAccess(Expression.Field(self, unsentDeltasAcessor), Expression.Constant(i)),
+                                            Expression.Constant(false)
+                                            )
+                                        ),
+                                    Expression.Assign( //if not sending, just copy the previous unsent state
+                                        Expression.ArrayAccess(Expression.Field(output, unsentDeltasAcessor), Expression.Constant(i)),
+                                        Expression.ArrayAccess(Expression.Field(self, unsentDeltasAcessor), Expression.Constant(i))
+                                        )
+                                    )
+                                );
 #if TRACING
                             expressions.Add(Expression.Block(
                                 deltaGroups[deltaGroups.Keys.ToList()[i]].Select(

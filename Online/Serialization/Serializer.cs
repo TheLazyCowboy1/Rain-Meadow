@@ -24,6 +24,7 @@ namespace RainMeadow
         private uint stateCount;
         private long stateHeader;
         public int zipTreshold = 4000;
+        //public int zipTreshold => 1000;
 
         static Serializer scratchpad;
         public Serializer(long bufferCapacity, bool scratch = false)
