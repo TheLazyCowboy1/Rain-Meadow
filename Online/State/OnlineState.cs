@@ -153,27 +153,73 @@ namespace RainMeadow
             public bool longList; // field needs ushort for indexes rather than bytes
             public bool always; // field is always sent, to be used as key
 
-            public OnlineFieldAttribute(string group = "default", bool nullable = false, bool polymorphic = false, bool always = false)
+            public float sendFrequency = 1f;
+            public float sendCounter = 0;
+
+            public const float OPTIMIZATION_AMOUNT_TEMPORARY = 0.5f;
+
+            public OnlineFieldAttribute(float sendFrequency, string group, bool nullable = false, bool polymorphic = false, bool always = false)
             {
+                this.sendFrequency = sendFrequency;
                 this.group = group;
                 this.nullable = nullable;
                 this.polymorphic = polymorphic;
                 this.always = always;
             }
 
+            public OnlineFieldAttribute(string group, bool nullable = false, bool polymorphic = false, bool always = false)
+                : this(1f, group, nullable, polymorphic, always)
+            { }
+            public OnlineFieldAttribute(float sendFrequency = 1f, bool nullable = false, bool polymorphic = false, bool always = false)
+            {
+                this.sendFrequency = sendFrequency;
+                this.group = UnityEngine.Random.value.GetHashCode().ToString(); //assign it as a random group
+                this.nullable = nullable;
+                this.polymorphic = polymorphic;
+                this.always = always;
+            }
+
+
             public virtual Expression SerializerCallMethod(FieldInfo f, Expression serializerRef, Expression fieldRef)
             {
                 return Expression.Call(serializerRef, Serializer.GetSerializationMethod(f.FieldType, nullable, polymorphic, longList), fieldRef);
             }
-
-            public virtual Expression ComparisonMethod(FieldInfo f, MemberExpression currentField, MemberExpression baselineField)
+            public virtual bool ShouldSend() => sendCounter <= 0 || always;
+            public virtual bool ShouldSendAndDecrement()
             {
-                if (f.FieldType.IsArray) return Expression.Call(
-                    typeof(Enumerable).GetMethods().First(m => m.Name == "SequenceEqual" && m.IsGenericMethodDefinition && m.GetParameters().Length == 2).MakeGenericMethod(f.FieldType.GetElementType()),
-                    Expression.Convert(currentField, typeof(IEnumerable<>).MakeGenericType(f.FieldType.GetElementType())),
-                    Expression.Convert(baselineField, typeof(IEnumerable<>).MakeGenericType(f.FieldType.GetElementType()))
-                    );
-                return Expression.Equal(currentField, baselineField);
+                if (always) return true;
+                bool shouldSend = sendCounter <= 0;
+                if (shouldSend)
+                    sendCounter += sendFrequency;
+                sendCounter -= Mathf.Min(sendFrequency, OPTIMIZATION_AMOUNT_TEMPORARY);
+                return shouldSend;
+            }
+
+            public virtual Expression ComparisonMethod(FieldInfo f, MemberExpression currentField, MemberExpression baselineField, MemberExpression outputField)
+            {
+                var testExpression1 = Expression.Call(Expression.Constant(this), typeof(OnlineFieldAttribute).GetMethod(nameof(ShouldSend)));
+                var testExpression2 = Expression.Call(Expression.Constant(this), typeof(OnlineFieldAttribute).GetMethod(nameof(ShouldSendAndDecrement)));
+                //assigns outputField with baselineField and returns true
+                var assignExpression = Expression.Assign(outputField, baselineField);
+
+                if (f.FieldType.IsArray) return Expression.Block(
+                    Expression.IfThen(testExpression1, assignExpression),
+                    Expression.Condition(testExpression2,
+                        Expression.Call(
+                            typeof(Enumerable).GetMethods().First(m => m.Name == "SequenceEqual" && m.IsGenericMethodDefinition && m.GetParameters().Length == 2).MakeGenericMethod(f.FieldType.GetElementType()),
+                            Expression.Convert(currentField, typeof(IEnumerable<>).MakeGenericType(f.FieldType.GetElementType())),
+                            Expression.Convert(baselineField, typeof(IEnumerable<>).MakeGenericType(f.FieldType.GetElementType()))
+                            ),
+                        Expression.Constant(true)
+                    )
+                );
+                return Expression.Block(
+                    Expression.IfThen(testExpression1, assignExpression),
+                    Expression.Condition(testExpression2,
+                        Expression.Equal(currentField, baselineField),
+                        Expression.Constant(true)
+                    )
+                );
             }
         }
 
@@ -182,7 +228,7 @@ namespace RainMeadow
             public OnlineFieldHalf(string group = "default", bool nullable = false, bool polymorphic = false, bool always = false) : base(group, nullable, polymorphic, always) { }
             public override Expression SerializerCallMethod(FieldInfo f, Expression serializerRef, Expression fieldRef)
             {
-                return Expression.Call(serializerRef, typeof(Serializer).GetMethods().First(m => 
+                return Expression.Call(serializerRef, typeof(Serializer).GetMethods().First(m =>
                 nullable ? m.Name == nameof(Serializer.SerializeHalfNullable) : m.Name == nameof(Serializer.SerializeHalf)
                 && m.GetParameters()[0].ParameterType == f.FieldType.MakeByRefType()), fieldRef);
             }
@@ -444,7 +490,7 @@ namespace RainMeadow
                                                 )
                                             : (f.FieldType.GetInterfaces().Any(x => x.IsGenericType && x.GetGenericTypeDefinition() == typeof(IDelta<>))) ?
                                                 Expression.Equal(Expression.Field(output, f), Expression.Constant(null, f.FieldType))
-                                            : f.GetCustomAttribute<OnlineFieldAttribute>().ComparisonMethod(f, Expression.Field(selfConverted, f), Expression.Field(baselineConverted, f))
+                                            : f.GetCustomAttribute<OnlineFieldAttribute>().ComparisonMethod(f, Expression.Field(selfConverted, f), Expression.Field(baselineConverted, f), Expression.Field(output, f))
                                             )
                                     ).Where(e => e != null).ToArray())
                                 ));
