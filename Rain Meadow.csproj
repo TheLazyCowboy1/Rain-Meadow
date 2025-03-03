@@ -30,6 +30,17 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Include="Utils\lz4\K4os.Compression.LZ4.Legacy\K4os.Compression.LZ4.Legacy.csproj" />
+    <None Include="Utils\lz4\K4os.Compression.LZ4.Legacy\K4os.Compression.LZ4\K4os.Compression.LZ4.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Buffers" Version="4.6.0" />
+    <PackageReference Include="System.IO.Pipelines" Version="9.0.2" />
+    <PackageReference Include="System.Memory" Version="4.6.0" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Compile Update="Properties\Settings.Designer.cs">
       <DesignTimeSharedInput>True</DesignTimeSharedInput>
       <AutoGen>True</AutoGen>

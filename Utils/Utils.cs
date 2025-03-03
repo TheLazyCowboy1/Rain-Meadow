@@ -1,7 +1,9 @@
-﻿using System;
+﻿using K4os.Compression.LZ4;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using UnityEngine;
 
 namespace RainMeadow
@@ -56,6 +58,48 @@ namespace RainMeadow
 
                 self.Add(item);
             }
+        }
+
+        public static byte[] Compress(byte[] bytes)
+        {
+            if (bytes.Length < 8) return bytes;
+
+            byte[] output = K4os.Compression.LZ4.Legacy.LZ4Wrapper.Wrap(bytes, 0, bytes.Length, GetCompressionLevel(bytes.Length));
+            if (bytes.Length > CompressionThreshold * 3)
+                RainMeadow.Debug($"Compressed bytes {bytes.Length} into {output.Length}");
+            return output;
+        }
+
+        public static int CompressionThreshold = 400; //this means that high compression begins at 1200; maximal compression begins at 4800
+        private static LZ4Level GetCompressionLevel(int length)
+        {
+            int idx = length / CompressionThreshold;
+            if (idx < 3) return 0; //compressions 0, 1, and 2 are all the same
+            if (idx > 12) return (LZ4Level)12; //if above max; set to max
+            return (LZ4Level)idx;
+        }
+
+        public static byte[]? Decompress(byte[]? bytes)
+        {
+            if (bytes == null) return null;
+            if (bytes.Length < 8) return bytes;
+
+            byte[] output = K4os.Compression.LZ4.Legacy.LZ4Wrapper.Unwrap(bytes);
+            if (bytes.Length > CompressionThreshold * 3)
+                RainMeadow.Debug($"Decompressed bytes {bytes.Length} into {output.Length}");
+            return output;
+            /*
+            int formerLength = bytes.Length;
+            using (var outStream = new MemoryStream())
+            using (var compressStream = new MemoryStream(bytes))
+            using (var decompressor = K4os.Compression.LZ4.Streams.LZ4Stream.Decode(compressStream))
+            {
+                decompressor.CopyTo(outStream);
+                var output = outStream.ToArray();
+                RainMeadow.Trace($"Decompressed {formerLength} bytes to {output.Length} bytes.");
+                return output;
+            }
+            */
         }
     }
 }

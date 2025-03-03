@@ -1,4 +1,5 @@
 using Ionic.Zlib;
+using RainMeadow.lz4;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -728,7 +729,7 @@ namespace RainMeadow
 
         public void SendRaw(byte[] packet, RemotePeer peer, PacketType packet_type, bool begin_conversation = false) {
             //compress packet
-            packet = Compress(packet); //compresses only the packet itself, not its type or length, etc.
+            packet = Utils.Compress(packet); //compresses only the packet itself, not its type or length, etc.
 
             using (MemoryStream stream = new(packet.Length + 6)) 
             using (BinaryWriter writer = new(stream)) {
@@ -750,31 +751,7 @@ namespace RainMeadow
                     peer.PeerEndPoint);
             }
         }
-        private static byte[] Compress(byte[] bytes)
-        {
-            int formerSize = bytes.Length;
-            using (var outputStream = new MemoryStream(bytes))
-            using (var compressStream = new MemoryStream())
-            using (var compressor = new DeflateStream(compressStream, CompressionMode.Compress))
-            {
-                outputStream.CopyTo(compressor);
-                compressor.Close();
-                var output = compressStream.ToArray();
-                RainMeadow.Debug($"Compressed {formerSize} bytes to {output.Length} bytes.");
-                return output;
-            }
-        }
-        private static byte[] Compress(Stream input, int len)
-        {
-            input.Seek(0, SeekOrigin.Begin);
-            using (var compressStream = new MemoryStream())
-            using (var compressor = new DeflateStream(compressStream, CompressionMode.Compress))
-            {
-                input.CopyTo(compressor, len);
-                compressor.Close();
-                return compressStream.ToArray();
-            }
-        }
+        
 
         const ulong PEER_TIMEOUT = 1000*3; 
         const ulong HEARTBEAT_TIME= 500; 

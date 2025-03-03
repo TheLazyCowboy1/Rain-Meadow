@@ -95,7 +95,7 @@ namespace RainMeadow
 
         public override void RawUpdate(float dt)
         {
-            myTimeStacker += dt * (float)framesPerSecond;
+            myTimeStacker += dt * (float)framesPerSecond * 1f; //10 TIMES SPEED YEAHHHHH (NO POINT DOING THAT!!!)
             netIO?.Update(); // incoming data
             lastReceive = UnityEngine.Time.realtimeSinceStartup;
 

@@ -29,7 +29,7 @@ namespace RainMeadow
         {
             var e = (OnlineState)MemberwiseClone();
             e.valueFlags = new bool[handler.ngroups];
-            e.unsentDeltas = new bool[handler.ngroups];
+            //e.unsentDeltas = new bool[handler.ngroups]; //don't reset unsentDeltas
             return e;
         }
 
@@ -110,6 +110,7 @@ namespace RainMeadow
             }
         }
 
+        private static long deltasSent = 0, deltasWithheld = 0, totalDeltas = 0;
         public virtual OnlineState Delta(OnlineState baseline)
         {
             if (baseline == null) throw new ArgumentNullException();
@@ -118,6 +119,14 @@ namespace RainMeadow
             try
             {
                 var result = handler.delta(this, baseline);
+                totalDeltas += result.valueFlags.LongLength;
+                deltasSent += result.valueFlags.Count(f => f);
+                deltasWithheld += result.unsentDeltas.Count(f => f);
+                if (totalDeltas >= 1000)
+                {
+                    RainMeadow.Debug($"TOTAL DELTAS: {totalDeltas}. {deltasSent} sent, {deltasWithheld} withheld.");
+                    totalDeltas = 0; deltasSent = 0; deltasWithheld = 0;
+                }
                 if (!result.isDelta) throw new InvalidProgrammerException("did not produce a delta");
                 return result;
             }
@@ -189,12 +198,12 @@ namespace RainMeadow
             }
             public virtual bool ShouldSend()
             {
-                if (always) return false;
+                if (always) return true;
                 bool shouldSend = sendCounter <= 0;
                 if (shouldSend)
                     sendCounter += sendFrequency;
                 sendCounter -= Mathf.Min(sendFrequency, OPTIMIZATION_AMOUNT_TEMPORARY);
-                return !shouldSend;
+                return shouldSend;
             }
 
             public virtual Expression ShouldSendMethod()
@@ -473,8 +482,9 @@ namespace RainMeadow
                             string deltaGroupKey = deltaGroups.Keys.ToList()[i];
                             if (deltaGroups[deltaGroupKey].Count == 0) continue;
                             // valueFlags[i] = self.f != baseline.f || self.f2 != baseline.f2 || ...
+                            // unsentDeltas[i] |= self.fields.Any(f => f != baseline.f)
                             expressions.Add(Expression.OrAssign( //if there's a delta waiting to be sent, keep unsent = true
-                                Expression.ArrayAccess(Expression.Field(self, unsentDeltasAcessor), Expression.Constant(i)),
+                                Expression.ArrayAccess(Expression.Field(output, valueFlagsAcessor), Expression.Constant(i)),
                                 OrAny(deltaGroups[deltaGroupKey].Select(
                                             f => Expression.Not(
                                                 (f.FieldType.GetInterfaces().Any(x => x.IsGenericType && x.GetGenericTypeDefinition() == typeof(IPrimaryDelta<>))) ?
@@ -493,26 +503,30 @@ namespace RainMeadow
                                         ).Where(e => e != null).ToArray())
                                 ));
 
-                            //assign unsentDeltas in self as well
-                            expressions.Add(
+                            //assign flags in output
+                            /*expressions.Add(
                                 Expression.IfThenElse(
                                     deltaGroups[deltaGroupKey][0].GetCustomAttribute<OnlineFieldAttribute>().ShouldSendMethod(),
                                     Expression.Block(
                                         Expression.Assign( //set output's value flag, depending on whether there's a delta
                                             Expression.ArrayAccess(Expression.Field(output, valueFlagsAcessor), Expression.Constant(i)),
-                                            Expression.ArrayAccess(Expression.Field(self, unsentDeltasAcessor), Expression.Constant(i))
+                                            Expression.ArrayAccess(Expression.Field(baseline, unsentDeltasAcessor), Expression.Constant(i))
                                             ),
                                         Expression.Assign( //delta is sent; mark unsentDelta as false
+                                            Expression.ArrayAccess(Expression.Field(output, unsentDeltasAcessor), Expression.Constant(i)),
+                                            Expression.Constant(false)
+                                            ),
+                                        Expression.Assign( //also assign self as false; this shouldn't do anything, but maybe it somehow will?
                                             Expression.ArrayAccess(Expression.Field(self, unsentDeltasAcessor), Expression.Constant(i)),
                                             Expression.Constant(false)
                                             )
                                         ),
                                     Expression.Assign( //if not sending, just copy the previous unsent state
                                         Expression.ArrayAccess(Expression.Field(output, unsentDeltasAcessor), Expression.Constant(i)),
-                                        Expression.ArrayAccess(Expression.Field(self, unsentDeltasAcessor), Expression.Constant(i))
+                                        Expression.ArrayAccess(Expression.Field(baseline, unsentDeltasAcessor), Expression.Constant(i))
                                         )
                                     )
-                                );
+                                );*/
 #if TRACING
                             expressions.Add(Expression.Block(
                                 deltaGroups[deltaGroups.Keys.ToList()[i]].Select(
