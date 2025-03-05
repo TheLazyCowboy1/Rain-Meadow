@@ -33,8 +33,8 @@
 
         public interface IStateSource // could as well be a base type, used in entityfeed and resourcesubscription only
         {
-            void Sent(OnlineStateMessage stateMessage);
-            void Failed(OnlineStateMessage stateMessage);
+            public abstract void Sent(OnlineStateMessage stateMessage);
+            public abstract void Failed(OnlineStateMessage stateMessage);
         }
     }
 }

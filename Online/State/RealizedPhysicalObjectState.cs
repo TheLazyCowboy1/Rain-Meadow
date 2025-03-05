@@ -12,12 +12,24 @@ namespace RainMeadow
         private ChunkState[] chunkStates;
         [OnlineField(group = "chunkstate")]
         private byte collisionLayer;
+        private AbstractPhysicalObject abstractPhysicalObject;
 
         public RealizedPhysicalObjectState() { }
         public RealizedPhysicalObjectState(OnlinePhysicalObject onlineEntity)
         {
             chunkStates = onlineEntity.apo.realizedObject.bodyChunks.Select(c => new ChunkState(c)).ToArray();
             collisionLayer = (byte)onlineEntity.apo.realizedObject.collisionLayer;
+            abstractPhysicalObject = onlineEntity.apo;
+        }
+
+        public override float GetStateSendFrequency(OnlinePlayer? player, OnlinePhysicalObject? opo)
+        {
+            if (opo?.apo.realizedObject != null)
+            {
+                if (opo.apo.Room.index == abstractPhysicalObject.Room.index)
+                    return Mathf.Max(0.2f, Vector2.Distance(opo.apo.realizedObject.firstChunk.pos, abstractPhysicalObject.realizedObject.firstChunk.pos) / (40f * 20f));
+            }
+            return 0.2f;
         }
 
         public virtual void ReadTo(OnlineEntity onlineEntity)

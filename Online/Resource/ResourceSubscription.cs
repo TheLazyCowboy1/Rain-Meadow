@@ -1,10 +1,11 @@
-﻿using System;
+﻿using RainMeadow.Generics;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 
 namespace RainMeadow
 {
-    public class ResourceSubscription : OnlineStateMessage.IStateSource // Feed resource state to player
+    public class ResourceSubscription : DynamicDeltaOptimizer<OnlineState, OnlineState>, OnlineStateMessage.IStateSource // Feed resource state to player
     {
         public OnlineResource resource;
         public OnlinePlayer player;
@@ -33,7 +34,7 @@ namespace RainMeadow
                 if (cooldown > 0) // don't spam
                 {
                     cooldown--;
-                    return;
+                    //return; //temporarily disabled!
                 }
             }
 
@@ -50,6 +51,8 @@ namespace RainMeadow
                 while (OutgoingStates.Count > 0 && player.recentlyAckdTicks.Contains(OutgoingStates.Peek().tick))
                 {
                     RainMeadow.Trace("Considering candidate:" + OutgoingStates.Peek().tick);
+                    //ProcessStateMessage(OutgoingStates.Peek());
+
                     lastAcknoledgedState = (OnlineResource.ResourceState)OutgoingStates.Dequeue().sourceState; // use most recent available
                 }
             }
@@ -58,13 +61,21 @@ namespace RainMeadow
             if (lastAcknoledgedState != null)
             {
                 RainMeadow.Trace($"sending delta for tick {newState.tick} from reference {lastAcknoledgedState.tick}");
-                var delta = (OnlineResource.ResourceState)newState.Delta(lastAcknoledgedState);
+                //var delta = (OnlineResource.ResourceState)newState.Delta(lastAcknoledgedState, player);
+                var delta = (OnlineResource.ResourceState)ProcessDelta(newState, lastAcknoledgedState, player);
+
+                //SetDeltas(delta, player);
+
                 //RainMeadow.Trace("Sending delta:\n" + delta.DebugPrint(0));
                 OutgoingStates.Enqueue(player.QueueStateMessage(new OnlineStateMessage(delta, newState, this, true, tick, delta.baseline)));
             }
             else
             {
                 RainMeadow.Trace($"sending absolute state for tick {newState.tick}");
+
+                //ResetFields(newState);
+                ResetSendFrequencies(newState.handler.deltaSendFrequencies);
+
                 //RainMeadow.Trace("Sending full:\n" + newState.DebugPrint(0));
                 OutgoingStates.Enqueue(player.QueueStateMessage(new OnlineStateMessage(newState, newState, this, false, tick, 0)));
             }
@@ -76,6 +87,15 @@ namespace RainMeadow
             RainMeadow.Debug($"recent states were [{string.Join(", ", OutgoingStates.Select(s => s.sentAsDelta ? $"{s.tick}d{s.baseline}" : $"{s.tick}"))}]");
             lastAcknoledgedState = null;
             OutgoingStates = new Queue<OnlineStateMessage>(OutgoingStates.Where(x => !x.sentAsDelta && x.tick > player.latestTickAck));
+        }
+
+        public override float GetDeltaSendFrequency(OnlineState self, OnlinePlayer? player, OnlinePhysicalObject? opo)
+        {
+            return self.GetStateSendFrequency(player, opo);
+        }
+        public override OnlineState ProcessDelta(OnlineState self, OnlineState other, bool[] ignoredDeltas, OnlinePlayer? player)
+        {
+            return self.Delta(other, ignoredDeltas, player);
         }
 
         public void Sent(OnlineStateMessage state)

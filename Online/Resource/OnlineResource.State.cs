@@ -302,6 +302,7 @@ namespace RainMeadow
                 return result;
             }
 
+            public SubleaseState Delta(SubleaseState other, OnlinePlayer? player) => Delta(other);
             public SubleaseState Delta(SubleaseState other)
             {
                 if (other == null) { return this; }

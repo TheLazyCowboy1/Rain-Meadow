@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 
 namespace RainMeadow.Generics
 {
@@ -11,11 +12,11 @@ namespace RainMeadow.Generics
     /// by convention returns object with IsEmptyDelta set on same-value delta (ease for polymorphism)
     /// </summary>
     /// <typeparam name="T"></typeparam>
-    public interface IPrimaryDelta<T>
+    public interface IPrimaryDelta<T> : IDelta<T>
     {
         public bool IsEmptyDelta { get; }
-        public T Delta(T other);
-        public T ApplyDelta(T other);
+        //public T Delta(T other);
+        //public T ApplyDelta(T other);
     }
 
     /// <summary>
@@ -28,6 +29,7 @@ namespace RainMeadow.Generics
     public interface IDelta<T>
     {
         public T Delta(T other);
+        public T Delta(T other, OnlinePlayer? player);
         public T ApplyDelta(T other);
     }
 
@@ -38,6 +40,122 @@ namespace RainMeadow.Generics
     public interface IIdentifiable<T> where T : IEquatable<T>
     {
         public T ID { get; }
+    }
+
+
+    public abstract class DeltaOptimizer<T, V> where T : IDelta<V>
+    {
+        public const float TEMPORARY_SEND_FREQUENCY = 0.5f;
+
+        public abstract T ProcessDelta(T self, T other, OnlinePlayer? player);
+
+        public virtual float GetDeltaSendFrequency(T self, OnlinePlayer? player, OnlinePhysicalObject? opo) => 1f;
+
+        /// <summary>
+        /// Used to if the subdelta is also a DeltaOptimizer, and thus needs to process the player.
+        /// Automatically handles both DeltaOptimizers and normal IDeltas
+        /// </summary>
+        public static U GetOptimizedDelta<U>(IDelta<U> delta, U baseline, OnlinePlayer? player, bool ignoreDeltas = false)
+        {
+            if (ignoreDeltas) return baseline;
+            if (delta.GetType() == baseline.GetType() && delta is DeltaOptimizer<IDelta<U>, U> optDelta) //if same type AND deltaOptimizer
+                return (U)optDelta.ProcessDelta(delta, (IDelta<U>)baseline, player);  //include the player
+            return delta.Delta(baseline);
+        }
+    }
+
+    /// <summary>
+    /// All fields have the exact same frequency
+    /// (the "always" attribute may differ; that is handled in OnlineState.cs)
+    /// </summary>
+    public abstract class InfrequentDeltaSender<T, V> : DeltaOptimizer<T, V> where T : IDelta<V> where V : class
+    {
+        private float sendCounter = 1f;
+        public float deltaFrequency = 1f;
+
+        public override T ProcessDelta(T self, T other, OnlinePlayer? player)
+        {
+            return GetIgnoreDeltas(self, player) ? other //send other (baseline) if delta is ignored
+                : (GetOptimizedDelta<V>(self, other as V, player) is T output ? output : self); //send self if it somehow fails
+        }
+
+        public virtual bool GetIgnoreDeltas(T self, OnlinePlayer? player)
+        {
+            //try to find player
+            OnlinePhysicalObject? opo = null;
+            try
+            {
+                opo = (OnlinePhysicalObject)OnlineManager.lobby.playerAvatars.Find(avatar => avatar.Key.inLobbyId == player?.inLobbyId)
+                    .Value.FindEntity(true);
+            }
+            catch { }
+            float opt = GetDeltaSendFrequency(self, player, opo);
+
+            bool ret = false;
+            sendCounter -= deltaFrequency * opt * TEMPORARY_SEND_FREQUENCY;
+            if (sendCounter > 0)
+                ret = true; //don't send; counter hasn't ticked down yet
+            else
+            {
+                sendCounter += 1;
+                if (sendCounter < 0) sendCounter = 0; //don't let it run away forever!
+            }
+
+            return ret;
+        }
+    }
+
+    /// <summary>
+    /// Field frequencies may vary, thus updating some fields more often than others
+    /// </summary>
+    public abstract class DynamicDeltaOptimizer<T, V> : DeltaOptimizer<T, V> where T : IDelta<V> where V : class
+    {
+        private float[] deltaCounters = [];
+        private float[] deltaSendFrequencies = [];
+
+        public void ResetSendFrequencies(float[] sendFrequencies)
+        {
+            deltaSendFrequencies = sendFrequencies;
+            deltaCounters = new float[sendFrequencies.Length];
+            Utils.FillArray(ref deltaCounters, 1f); //reset all delta counters too
+        }
+
+        public abstract T ProcessDelta(T self, T other, bool[] ignoredDeltas, OnlinePlayer? player);
+
+        public override T ProcessDelta(T self, T other, OnlinePlayer? player) => ProcessDelta(self, other, GetIgnoredDeltas(self, player), player);
+
+        public virtual bool[] GetIgnoredDeltas(T self, OnlinePlayer? player)
+        {
+            //try to find player
+            OnlinePhysicalObject? opo = null;
+            try
+            {
+                opo = (OnlinePhysicalObject)OnlineManager.lobby.playerAvatars.Find(avatar => avatar.Key.inLobbyId == player?.inLobbyId)
+                    .Value.FindEntity(true);
+            }
+            catch { }
+            float opt = GetDeltaSendFrequency(self, player, opo);
+
+            if (deltaCounters is null || deltaSendFrequencies is null) return [];
+
+            bool[] ret = new bool[deltaCounters.Length];
+            for (int i = 0; i < deltaCounters.Length; i++)
+            {
+                if (deltaSendFrequencies[i] > 0) //ignore fields marked as always (0 == always)
+                {
+                    deltaCounters[i] -= deltaSendFrequencies[i] * opt * TEMPORARY_SEND_FREQUENCY;
+                    if (deltaCounters[i] > 0)
+                        ret[i] = true; //don't send; counter hasn't ticked down yet
+                    else
+                    {
+                        deltaCounters[i] += 1;
+                        if (deltaCounters[i] < 0) deltaCounters[i] = 0; //don't let it run away forever!
+                    }
+                }
+            }
+
+            return ret;
+        }
     }
 
     public class IdentityComparer<T, U> : IEqualityComparer<T> where T : IIdentifiable<U> where U : IEquatable<U>
@@ -70,6 +188,7 @@ namespace RainMeadow.Generics
             this.list = list;
         }
 
+        public Imp Delta(Imp other, OnlinePlayer? player) => Delta(other);
         public Imp Delta(Imp other)
         {
             if (other == null) { return (Imp)this; }
@@ -106,6 +225,7 @@ namespace RainMeadow.Generics
             this.list = list;
         }
 
+        public Imp Delta(Imp other, OnlinePlayer? player) => Delta(other);
         public Imp Delta(Imp other)
         {
             if (other == null) { return (Imp)this; }
@@ -156,6 +276,7 @@ namespace RainMeadow.Generics
             this.list = list;
         }
 
+        public Imp Delta(Imp other, OnlinePlayer? player) => Delta(other);
         public Imp Delta(Imp other)
         {
             if (other == null) { return (Imp)this; }
@@ -185,7 +306,7 @@ namespace RainMeadow.Generics
     /// <summary>
     /// Static list, no adds/removes supported, id-elementwise delta
     /// </summary>
-    public abstract class FixedIdentifiablesDeltaList<T, U, V, Imp> : Serializer.ICustomSerializable, IDelta<Imp> where T : IDelta<V>, V, IIdentifiable<U> where U : IEquatable<U> where Imp : FixedIdentifiablesDeltaList<T, U, V, Imp>, new()
+    public abstract class FixedIdentifiablesDeltaList<T, U, V, Imp> : InfrequentDeltaSender<Imp, Imp>, IDelta<Imp>, Serializer.ICustomSerializable where T : IDelta<V>, V, IIdentifiable<U> where U : IEquatable<U> where Imp : FixedIdentifiablesDeltaList<T, U, V, Imp>, new()
     {
         public List<T> list;
         public FixedIdentifiablesDeltaList() { }
@@ -194,11 +315,15 @@ namespace RainMeadow.Generics
             this.list = list;
         }
 
-        public Imp Delta(Imp other)
+        public Imp Delta(Imp other, OnlinePlayer? player) => ProcessDelta((Imp)this, other, player);
+        public Imp Delta(Imp other) => ProcessDelta((Imp)this, other, null);
+        public override Imp ProcessDelta(Imp self, Imp other, OnlinePlayer? player) //here, self == this. Kinda sloppy, but it works
         {
-            if (other == null) { return (Imp)this; }
+            if (GetIgnoreDeltas(self,player)) return self;
+            if (other == null) { return self; }
             Imp delta = new();
-            delta.list = list.Select(sl => (T)sl.Delta(other.list.FirstOrDefault(osl => osl.ID.Equals(sl.ID)))).Where(sl => sl != null).ToList();
+            //delta.list = list.Select(sl => (T)sl.Delta(other.list.FirstOrDefault(osl => osl.ID.Equals(sl.ID)))).Where(sl => sl != null).ToList();
+            delta.list = list.Select(sl => (T)GetOptimizedDelta(sl, other.list.FirstOrDefault(osl => osl.ID.Equals(sl.ID)), player)).Where(sl => sl != null).ToList();
             return delta.list.Count == 0 ? null : delta;
         }
 
@@ -235,6 +360,7 @@ namespace RainMeadow.Generics
             removedLookup = removed == null ? null : new HashSet<U>(removed);
         }
 
+        public Imp Delta(Imp other, OnlinePlayer? player) => Delta(other);
         public Imp Delta(Imp other)
         {
             if (other == null) { return (Imp)this; }
@@ -298,6 +424,7 @@ namespace RainMeadow.Generics
             removedLookup = removed == null ? null : new HashSet<TKey>(removed);
         }
 
+        public Imp Delta(Imp other, OnlinePlayer? player) => Delta(other);
         public Imp Delta(Imp baseline)
         {
             if (baseline == null) { return (Imp)this; }
@@ -342,7 +469,7 @@ namespace RainMeadow.Generics
     /// <summary>
     /// Dynamic list, id-elementwise delta
     /// </summary>
-    public abstract class DynamicIdentifiablesDeltaList<T, U, W, Imp> : Serializer.ICustomSerializable, IDelta<Imp> where T : class, IDelta<W>, W, IIdentifiable<U> where U : IEquatable<U> where Imp : DynamicIdentifiablesDeltaList<T, U, W, Imp>, new()
+    public abstract class DynamicIdentifiablesDeltaList<T, U, W, Imp> : InfrequentDeltaSender<Imp, Imp>, IDelta<Imp>, Serializer.ICustomSerializable where T : class, IDelta<W>, W, IIdentifiable<U> where U : IEquatable<U> where Imp : DynamicIdentifiablesDeltaList<T, U, W, Imp>, new()
     {
         public List<T> list;
         public List<U> removed;
@@ -361,11 +488,14 @@ namespace RainMeadow.Generics
             removedLookup = removed == null ? null : new HashSet<U>(removed);
         }
 
-        public Imp Delta(Imp other)
+        public Imp Delta(Imp other, OnlinePlayer? player) => ProcessDelta((Imp)this, other, player);
+        public Imp Delta(Imp other) => ProcessDelta((Imp)this, other, null); //should never be used, hopefully
+        public Imp ProcessDelta(Imp self, Imp other, OnlinePlayer? player)
         {
-            if (other == null) { return (Imp)this; }
+            if (GetIgnoreDeltas(self,player)) return self;
+            if (other == null) { return self; }
             Imp delta = new();
-            delta.list = list.Select(sl => other.lookup.TryGetValue(sl.ID, out var b) ? (T)sl.Delta(b) : sl).Where(sl => sl != null).ToList();
+            delta.list = list.Select(sl => other.lookup.TryGetValue(sl.ID, out var b) ? (T)GetOptimizedDelta(sl, b, player) : sl).Where(sl => sl != null).ToList();
             delta.removed = other.list.Select(e => e.ID).Where(e => !lookup.ContainsKey(e)).ToList();
             delta.BuildLookup();
             return (delta.list.Count == 0 && delta.removed.Count == 0) ? null : delta;
@@ -405,7 +535,7 @@ namespace RainMeadow.Generics
     /// <summary>
     /// Dynamic list, id-elementwise delta
     /// </summary>
-    public abstract class DynamicIdentifiablesPrimaryDeltaList<T, U, W, Imp> : Serializer.ICustomSerializable, IDelta<Imp> where T : class, IPrimaryDelta<W>, W, IIdentifiable<U> where U : IEquatable<U> where Imp : DynamicIdentifiablesPrimaryDeltaList<T, U, W, Imp>, new()
+    public abstract class DynamicIdentifiablesPrimaryDeltaList<T, U, W, Imp> : InfrequentDeltaSender<Imp, Imp>, IDelta<Imp>, Serializer.ICustomSerializable where T : class, IPrimaryDelta<W>, W, IIdentifiable<U> where U : IEquatable<U> where Imp : DynamicIdentifiablesPrimaryDeltaList<T, U, W, Imp>, new()
     {
         public List<T> list;
         public List<U> removed;
@@ -425,11 +555,16 @@ namespace RainMeadow.Generics
             removedLookup = removed == null ? null : new HashSet<U>(removed);
         }
 
-        public Imp Delta(Imp baseline)
+        public Imp Delta(Imp other, OnlinePlayer? player) => ProcessDelta((Imp)this, other, player);
+        public Imp Delta(Imp other) => ProcessDelta((Imp)this, other, null); //should never be used, hopefully
+        public override Imp ProcessDelta(Imp self, Imp baseline, OnlinePlayer? player)
         {
+            if (GetIgnoreDeltas(self,player)) return self;
             if (baseline == null) { return (Imp)this; }
             Imp delta = new();
-            delta.list = list.Select(e => baseline.lookup.TryGetValue(e.ID, out var b) ? (T)e.Delta(b) : e).Where(sl => !sl.IsEmptyDelta).ToList();
+            //delta.list = list.Select(e => baseline.lookup.TryGetValue(e.ID, out var b) ? (T)e.Delta(b) : e).Where(sl => !sl.IsEmptyDelta).ToList();
+            delta.list = list.Select(
+                e => baseline.lookup.TryGetValue(e.ID, out var b) ? (T)GetOptimizedDelta(e, b, player) : e).Where(sl => !sl.IsEmptyDelta).ToList();
             delta.removed = baseline.list.Select(e => e.ID).Where(e => !lookup.ContainsKey(e)).ToList();
             delta.BuildLookup();
             return (delta.list.Count == 0 && delta.removed.Count == 0) ? null : delta;

@@ -22,6 +22,7 @@ namespace RainMeadow
             handler = handlersByType[GetType()];
             valueFlags = new bool[handler.ngroups];
             unsentDeltas = new bool[handler.ngroups];
+            //deltaCounters = new float[handler.ngroups];
         }
 
         // Warning: not a deep clone
@@ -29,7 +30,8 @@ namespace RainMeadow
         {
             var e = (OnlineState)MemberwiseClone();
             e.valueFlags = new bool[handler.ngroups];
-            //e.unsentDeltas = new bool[handler.ngroups]; //don't reset unsentDeltas
+            e.unsentDeltas = new bool[handler.ngroups]; //don't reset unsentDeltas;
+            //e.deltaCounters = new float[handler.ngroups];
             return e;
         }
 
@@ -94,6 +96,9 @@ namespace RainMeadow
             }
         }
 
+        //dynamic optimization
+        public virtual float GetStateSendFrequency(OnlinePlayer? player, OnlinePhysicalObject? opo) => 1f;
+
         public virtual void CustomSerialize(Serializer serializer)
         {
             try
@@ -110,23 +115,22 @@ namespace RainMeadow
             }
         }
 
-        private static long deltasSent = 0, deltasWithheld = 0, totalDeltas = 0;
-        public virtual OnlineState Delta(OnlineState baseline)
+        public virtual OnlineState Delta(OnlineState baseline) => Delta(baseline, new bool[0], null); //VERY hopefully should never be used!
+        public virtual OnlineState Delta(OnlineState baseline, OnlinePlayer? player) => Delta(baseline, new bool[0], player); //also hopefully not used...
+
+        public virtual OnlineState Delta(OnlineState baseline, bool[] ignoredDeltas, OnlinePlayer? player)
         {
-            if (baseline == null) throw new ArgumentNullException();
+            if (baseline == null) throw new ArgumentNullException("base null");
             if (baseline.isDelta) throw new InvalidProgrammerException("baseline is delta");
             if (isDelta) throw new InvalidProgrammerException("self is delta");
             try
             {
-                var result = handler.delta(this, baseline);
-                totalDeltas += result.valueFlags.LongLength;
-                deltasSent += result.valueFlags.Count(f => f);
-                deltasWithheld += result.unsentDeltas.Count(f => f);
-                if (totalDeltas >= 1000)
-                {
-                    RainMeadow.Debug($"TOTAL DELTAS: {totalDeltas}. {deltasSent} sent, {deltasWithheld} withheld.");
-                    totalDeltas = 0; deltasSent = 0; deltasWithheld = 0;
-                }
+                if (player is null) player = new OnlinePlayer(new LANMatchmakingManager.LANPlayerId(new System.Net.IPEndPoint(-1, -1))); //hack to prevent linq errors
+                if (this == null) throw new ArgumentNullException("this null");
+                if (ignoredDeltas == null) throw new ArgumentNullException("ignoredDeltas null");
+                if (player is null) throw new ArgumentNullException("player null");
+                if (handler.delta == null) throw new ArgumentNullException("delta null");
+                var result = handler.delta(this, baseline, ignoredDeltas, player);
                 if (!result.isDelta) throw new InvalidProgrammerException("did not produce a delta");
                 return result;
             }
@@ -260,9 +264,11 @@ namespace RainMeadow
             public DeltaSupport deltaSupport;
             public Func<OnlineState> factory;
             public Action<OnlineState, Serializer> serialize;
-            public Func<OnlineState, OnlineState, OnlineState> delta;
+            public Func<OnlineState, OnlineState, bool[], OnlinePlayer, OnlineState> delta;
             public Func<OnlineState, OnlineState, OnlineState> applydelta;
             public int ngroups;
+
+            public float[] deltaSendFrequencies;
 
             public enum DeltaSupport
             {
@@ -307,6 +313,16 @@ namespace RainMeadow
                     Dictionary<string, List<FieldInfo>> deltaGroups = fields.Where(o => !o.GetCustomAttribute<OnlineFieldAttribute>().always).GroupBy(o => o.GetCustomAttribute<OnlineFieldAttribute>().group).ToDictionary(g => g.Key, g => g.ToList());
                     ngroups = deltaGroups.Count;
                     RainMeadow.Debug($"found {ngroups} groups");
+
+                    //set deltaOptimizations
+                    deltaSendFrequencies = new float[ngroups];
+                    for (int i = 0; i < ngroups; i++) {
+                        var l = deltaGroups[deltaGroups.Keys.ToList()[i]];
+                        if (l.Exists(f => f.GetCustomAttribute<OnlineFieldAttribute>().always))
+                            deltaSendFrequencies[i] = 0;
+                        else
+                            deltaSendFrequencies[i] = l.Count > 0 ? l[0].GetCustomAttribute<OnlineFieldAttribute>().sendFrequency : 1f;
+                    }
 
                     var valueFlagsAcessor = typeof(OnlineState).GetField("valueFlags", anyInstance);
                     var unsentDeltasAcessor = typeof(OnlineState).GetField("unsentDeltas", anyInstance);
@@ -434,6 +450,10 @@ namespace RainMeadow
                         ParameterExpression output = Expression.Variable(type, "output");
                         MethodInfo cloneRef = typeof(OnlineState).GetMethod("Clone", anyInstance);
 
+                        ParameterExpression player = Expression.Parameter(typeof(OnlinePlayer), "player");
+
+                        ParameterExpression ignoredDeltas = Expression.Parameter(typeof(bool[]), "ignoredDeltas");
+
                         // if (baseline == null) throw new InvalidProgrammerException("baseline is null");
                         // **if (baseline.IsDelta) throw new InvalidProgrammerException("baseline is delta");
                         // var output = DeepCopy();
@@ -469,8 +489,8 @@ namespace RainMeadow
                                                 (f.FieldType.GetInterfaces().Any(x => x.IsGenericType && x.GetGenericTypeDefinition() == typeof(Generics.IPrimaryDelta<>))) ?
                                                     Expression.Condition(Expression.Equal(Expression.Field(baselineConverted, f), Expression.Constant(null, f.FieldType)),
                                                     Expression.Field(selfConverted, f),
-                                                    Expression.Convert(Expression.Call(Expression.Field(selfConverted, f), f.FieldType.GetMethod("Delta"), Expression.Field(baselineConverted, f)), f.FieldType))
-                                                : Expression.Convert(Expression.Call(Expression.Field(selfConverted, f), f.FieldType.GetMethod("Delta"), Expression.Field(baselineConverted, f)), f.FieldType)
+                                                    Expression.Convert(Expression.Call(Expression.Field(selfConverted, f), f.FieldType.GetMethod("Delta", [f.FieldType, typeof(OnlinePlayer)]), Expression.Field(baselineConverted, f), player), f.FieldType))
+                                                : Expression.Convert(Expression.Call(Expression.Field(selfConverted, f), f.FieldType.GetMethod("Delta", [f.FieldType, typeof(OnlinePlayer)]), Expression.Field(baselineConverted, f), player), f.FieldType)
                                                 )
                                            ));
                             }
@@ -481,9 +501,31 @@ namespace RainMeadow
                         {
                             string deltaGroupKey = deltaGroups.Keys.ToList()[i];
                             if (deltaGroups[deltaGroupKey].Count == 0) continue;
+
+                            //handle ignored deltas IF the group is not marked as always send
+                            if (!deltaGroups[deltaGroupKey].Any(f => f.GetCustomAttribute<OnlineFieldAttribute>().always))
+                            {
+                                expressions.Add(Expression.IfThen(
+                                    Expression.AndAlso( //checks that ignoredDeltas is the proper length
+                                        Expression.Equal(
+                                            Expression.Call(ignoredDeltas, typeof(bool[]).GetMethod("GetLength"), Expression.Constant(0)),
+                                            Expression.Constant(ngroups)), //ignoredDeltas.Length == ngroups
+                                        Expression.ArrayAccess(ignoredDeltas, Expression.Constant(i)) //if ignored
+                                    ),
+                                    Expression.Block(
+                                        deltaGroups[deltaGroupKey].Select(
+                                            f => Expression.Assign(
+                                                Expression.Field(selfConverted, f), //then override self's fields
+                                                Expression.Field(baselineConverted, f) //with base fields
+                                                )
+                                            )
+                                    )
+                                    ));
+                            }
+
                             // valueFlags[i] = self.f != baseline.f || self.f2 != baseline.f2 || ...
                             // unsentDeltas[i] |= self.fields.Any(f => f != baseline.f)
-                            expressions.Add(Expression.OrAssign( //if there's a delta waiting to be sent, keep unsent = true
+                            expressions.Add(Expression.Assign(
                                 Expression.ArrayAccess(Expression.Field(output, valueFlagsAcessor), Expression.Constant(i)),
                                 OrAny(deltaGroups[deltaGroupKey].Select(
                                             f => Expression.Not(
@@ -502,6 +544,7 @@ namespace RainMeadow
                                                 )
                                         ).Where(e => e != null).ToArray())
                                 ));
+
 
                             //assign flags in output
                             /*expressions.Add(
@@ -559,7 +602,7 @@ namespace RainMeadow
 
                         expressions.Add(output); // return
 
-                        delta = Expression.Lambda<Func<OnlineState, OnlineState, OnlineState>>(Expression.Block(new[] { selfConverted, baselineConverted, output }, expressions), self, baseline).Compile();
+                        delta = Expression.Lambda<Func<OnlineState, OnlineState, bool[], OnlinePlayer, OnlineState>>(Expression.Block(new[] { selfConverted, baselineConverted, ignoredDeltas, player, output }, expressions), self, baseline, ignoredDeltas, player).Compile();
 
                         // make applydelta func
 

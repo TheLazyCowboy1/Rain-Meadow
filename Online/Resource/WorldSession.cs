@@ -112,6 +112,11 @@ namespace RainMeadow
                 }
             }
 
+            public override float GetStateSendFrequency(OnlinePlayer? player, OnlinePhysicalObject? opo)
+            {
+                return 0.2f;
+            }
+
             public override void ReadTo(OnlineResource resource)
             {
                 if (resource.isActive)

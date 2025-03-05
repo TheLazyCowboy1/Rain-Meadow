@@ -222,6 +222,11 @@ namespace RainMeadow
                 onlineIntRemixSettings = lobby.configurableInts;
             }
 
+            public override float GetStateSendFrequency(OnlinePlayer? player, OnlinePhysicalObject? opo)
+            {
+                return 0.2f;
+            }
+
             public override void ReadTo(OnlineResource resource)
             {
                 var lobby = (Lobby)resource;

@@ -4,6 +4,8 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
+using System.Linq;
 using UnityEngine;
 
 namespace RainMeadow
@@ -60,32 +62,115 @@ namespace RainMeadow
             }
         }
 
+        private static FileStream? stream = null; //temporarily implemented for debugging graphs
         public static byte[] Compress(byte[] bytes)
         {
+            return bytes;
+            /*
+            using (MemoryStream compressStream = new())
+            using (DeflateStream compressor = new(compressStream, CompressionMode.Compress))
+            {
+                compressor.Read(bytes, 0, bytes.Length);
+                compressor.Close();
+                var output = compressStream.ToArray();
+                //try writing debug file
+                try
+                {
+                    if (OnlineManager.lobby != null && OnlineManager.lobby.isOwner)
+                    {
+                        if (bytes.Length > 128)
+                        {
+                            if (stream == null)
+                            {
+                                stream = File.OpenWrite(AssetManager.ResolveFilePath("compressionChart.csv", true));
+                                stream.Seek(stream.Length, SeekOrigin.End); //move to end; we're appending
+                            }
+                            string str = $"{bytes.Length},{output.Length}\n";
+                            var arr = str.ToCharArray().Select(c => (byte)c).ToArray();
+                            stream.Write(arr, 0, arr.Length);
+                            //just let it run indefinitely
+                        }
+                    }
+                    else if (stream != null) { stream.Close(); stream = null; } //close stream if it exists
+                }
+                catch { }
+                return output;
+            }
+            */
+            
             if (bytes.Length < 8) return bytes;
 
             byte[] output = K4os.Compression.LZ4.Legacy.LZ4Wrapper.Wrap(bytes, 0, bytes.Length, GetCompressionLevel(bytes.Length));
-            if (bytes.Length > CompressionThreshold * 3)
+            if (bytes.Length > CompressionThreshold)
                 RainMeadow.Debug($"Compressed bytes {bytes.Length} into {output.Length}");
+
+            //try writing debug file
+            try
+            {
+                if (OnlineManager.lobby != null && OnlineManager.lobby.isOwner)
+                {
+                    if (bytes.Length > 128)
+                    {
+                        if (stream == null)
+                        {
+                            stream = File.OpenWrite(AssetManager.ResolveFilePath("compressionChart.csv", true));
+                            stream.Seek(stream.Length, SeekOrigin.End); //move to end; we're appending
+                        }
+                        string str = $"{bytes.Length},{output.Length}\n";
+                        var arr = str.ToCharArray().Select(c => (byte)c).ToArray();
+                        stream.Write(arr, 0, arr.Length);
+                        //just let it run indefinitely
+                    }
+                }
+                else if (stream != null) { stream.Close(); stream = null; } //close stream if it exists
+            }
+            catch { }
+
             return output;
+
         }
 
-        public static int CompressionThreshold = 400; //this means that high compression begins at 1200; maximal compression begins at 4800
+        public static int CompressionThreshold = 1024; //begins high compression; each higher level requires double the previous requirement
+        //public static int CompressionThreshold = 400;
         private static LZ4Level GetCompressionLevel(int length)
         {
+            //return LZ4Level.L09_HC;
             int idx = length / CompressionThreshold;
-            if (idx < 3) return 0; //compressions 0, 1, and 2 are all the same
-            if (idx > 12) return (LZ4Level)12; //if above max; set to max
-            return (LZ4Level)idx;
+            
+            if (idx <= 0) return (LZ4Level)0; //below compression threshold = fast compression
+
+            //compressions 3-11
+            for (int shiftCounter = 4; shiftCounter <= 12; shiftCounter++)
+            {
+                idx >>>= 1; //divide by 2
+                if (idx <= 0) return (LZ4Level)(shiftCounter - 1); //4 - 1 = 3
+            }
+            return (LZ4Level)12; //compression 12
+            
+            //if (idx < 3) return (LZ4Level)0; //compressions 0, 1, and 2 are all the same: fast compression
+            //if (idx > 9) return (LZ4Level)9; //cap at 9; above 9 starts getting stupidly slow
+            //if (idx > 12) return (LZ4Level)12; //if above max; set to max
+            //return (LZ4Level)idx;
         }
 
         public static byte[]? Decompress(byte[]? bytes)
         {
+            return bytes;
+            /*
+            if (bytes == null) return null;
+            using (MemoryStream inputStream = new())
+            using (MemoryStream decompressStream = new(bytes))
+            using (DeflateStream decompressor = new(decompressStream, CompressionMode.Decompress))
+            {
+                decompressor.CopyTo(inputStream);
+                return inputStream.ToArray();
+            }
+            */
             if (bytes == null) return null;
             if (bytes.Length < 8) return bytes;
 
             byte[] output = K4os.Compression.LZ4.Legacy.LZ4Wrapper.Unwrap(bytes);
-            if (bytes.Length > CompressionThreshold * 3)
+            if (output.Length > CompressionThreshold)
                 RainMeadow.Debug($"Decompressed bytes {bytes.Length} into {output.Length}");
             return output;
             /*
@@ -100,6 +185,11 @@ namespace RainMeadow
                 return output;
             }
             */
+        }
+
+        public static void FillArray<T>(ref T[] arr, T val)
+        {
+            for (int i = 0; i < arr.Length; i++) arr[i] = val;
         }
     }
 }
