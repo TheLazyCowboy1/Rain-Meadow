@@ -306,6 +306,7 @@ namespace RainMeadow
                     return;
                 }
 
+                long startPos = serializer.Position;
                 try
                 {
                     handler.serialize(this, serializer);
@@ -313,6 +314,7 @@ namespace RainMeadow
                 catch (Exception)
                 {
                     RainMeadow.Error($"Error serializing RPC {this}");
+                    serializer.stream.Position = startPos + argsLength;
                     throw;
                 }
             }
